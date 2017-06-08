@@ -1,0 +1,155 @@
+#!perl
+
+# DATE
+# VERSION
+
+use 5.010001;
+use strict;
+use warnings;
+
+use File::Which;
+use Getopt::Long qw(:config bundling no_ignore_case gnu_compat no_getopt_compat pass_through);
+use String::ShellQuote;
+
+my $PROG = 'block-web-flooders-on-spanel';
+
+my %Opts = (
+    site => undef,
+);
+
+sub parse_options {
+    Getopt::Long::GetOptions(
+        'help|h|?' => sub {
+            print "Usage: $PROG [options]\n";
+            print <<EOT;
+Usage: $PROG [options]
+Options:
+  --site=S  Tail webserver access logs for site S.
+
+Other options will be passed to `block-web-flooders`. For more details, see the
+documentation (man $PROG).
+EOT
+            exit 0;
+        },
+        'version|v' => sub {
+            no warnings 'once';
+            print "$PROG version ", ($main::VERSION // "dev"), "\n";
+            exit 0;
+        },
+        'site=s' => $Opts{site},
+    );
+
+    die "$PROG: Please specify --site\n" unless defined $Opts{site};
+    $Opts{site} =~ /\A[\w-]+(\.[\w-]+)*\z/ or die "$PROG: Invalid site `$Opts{site}`\n";
+    (-d "/s/$Opts{site}") or die "$PROG: Site not found `$Opts{site}`\n";
+}
+
+sub run {
+    require IO::Tail;
+
+    my $cmd = join(
+        " ",
+        "block-web-flooders",
+        map { shell_quote $_ } @ARGV
+    );
+    open my $child, "| $cmd" or die "$PROG: Can't run block-web-flooders: $!\n";
+
+    my $tail = IO::Tail->new;
+
+    my $last_check_time;
+    my $http_log_name;
+    my $https_log_name;
+    chdir "/s/$Opts{site}/syslog"
+        or die "$PROG: Can't chdir to /s/$Opts{site}/syslog: $!\n";
+    while (1) {
+        my $now = time();
+        # find newest log file
+        if (!$last_check_time || $last_check_time < $now - 5) {
+
+            {
+                my @http_log_names = sort(glob "http_access.*.log");
+                if (@http_log_names) {
+                    if (!$http_log_name || $http_log_name ne $http_log_names[-1]) {
+                        # newest log has changed
+                        $tail->remove_file($http_log_name) if $http_log_name;
+                        $http_log_name = $http_log_names[-1];
+                        $tail->add(
+                            $http_log_name, sub {
+                                print $child $_[0];
+                            });
+                    }
+                }
+            }
+
+            {
+                my @https_log_names = sort(glob "https_access.*.log");
+                if (@https_log_names) {
+                    if (!$https_log_name || $https_log_name ne $https_log_names[-1]) {
+                        # newest log has changed
+                        $tail->remove_file($https_log_name) if $https_log_name;
+                        $https_log_name = $https_log_names[-1];
+                        $tail->add(
+                            $https_log_name, sub {
+                                print $child $_[0];
+                            });
+                    }
+                }
+            }
+
+            $last_check_time = $now;
+        }
+
+        $tail->check;
+        sleep 1;
+    }
+}
+
+# MAIN
+
+$|++;
+die "$PROG: Please run me as root\n" if $>;
+which("block-web-flooders") or die "$PROG: Can't find block-web-flooders script, please install it first\n";
+parse_options();
+run();
+
+# PODNAME:
+# ABSTRACT: Block IP addresses of web flooders using iptables (on an Spanel server)
+
+=head1 SYNOPSIS
+
+ # block-web-flooders-on-spanel --site example.com [other block-web-flooders options]
+
+
+=head1 DESCRIPTION
+
+This script is a convenience wrapper for L<block-web-flooders>, for use on
+Spanel servers. Instead of piping the output of B<tail -f> command manually
+like:
+
+ # tail -f /s/example.com/syslog/http_access.2017-06-08.log | block-web-flooders ...
+
+and thus having to know the date and switch to another log file every day, you
+just specify:
+
+ # block-web-flooders-on-spanel --site example.com ...
+
+This script will then find the newest web server access logs (HTTP as well as
+HTTPS) and automatically switch over to the new logs. This script will then tail
+the log files and feed it to L<block-web-flooders>. All the other options are
+passed to C<block-web-flooders>.
+
+
+=head1 OPTIONS
+
+=over
+
+=item * --site=S
+
+=back
+
+
+=head1 SEE ALSO
+
+Spanel, L<htps://spanel.info/>
+
+L<block-web-flooders> from L<App::BlockWebFlooders>
